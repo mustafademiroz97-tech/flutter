@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/mqtt_service.dart';
 import '../models/mqtt_payload.dart';
+import '../config/environment.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -37,8 +38,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _setupMqtt() {
-    // BURAYA KENDİ IP ADRESİNİ YAZ!
-    MqttManager().connect('192.168.1.10');
+    // Use MQTT broker from environment configuration
+    MqttManager().connect(Environment.mqttBrokerHost);
 
     MqttManager().dataStream.listen((MqttSensorData data) {
       if (mounted) {
