@@ -1,265 +1,322 @@
-import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
-import 'dart:io';
+import 'dart:convert';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-class AgriApiService {
-  static const String baseUrl = "http://192.168.1.10:5000"; // Pi IP adresi
-  static const String mqttBrokerHost = "192.168.1.10"; // MQTT broker IP adresi
+/// API Service for backend integration and camera video feed
+/// Provides HTTP client configuration for:
+/// - Backend API: 192.168.1.10:5000
+/// - Camera Video Feed: 192.168.1.169
+class ApiService {
+  // Private constructor
+  ApiService._();
 
-  late MqttServerClient _mqttClient;
+  // Singleton instance
+  static final ApiService _instance = ApiService._();
 
-  AgriApiService() {
-    _mqttClient = MqttServerClient(mqttBrokerHost, 'flutter-client-${DateTime.now().millisecondsSinceEpoch}');
-    _mqttClient.port = 1883; // MQTT portu
-    _mqttClient.logging(on: false);
-    _mqttClient.keepAlivePeriod = 20;
-    _mqttClient.onDisconnected = () => print('MQTT disconnected');
-    _mqttClient.onConnected = () => print('MQTT Connected');
-    _mqttClient.onSubscribed = (topic) => print('Subscribed to $topic');
-    _mqttClient.onSubscribeFail = (topic) => print('Failed to subscribe $topic');
+  // Factory constructor
+  factory ApiService() {
+    return _instance;
   }
 
-  Future<void> connectMqtt() async {
+  // HTTP Client
+  static final http.Client _httpClient = http.Client();
+
+  // Environment Configuration
+  late String _backendBaseUrl;
+  late String _cameraVideoFeedUrl;
+  late Duration _requestTimeout;
+
+  /// Initialize API Service with environment configuration
+  /// Call this method in main.dart before using the service
+  Future<void> initialize() async {
     try {
-      await _mqttClient.connect();
+      // Load environment variables from .env file
+      await dotenv.load();
+
+      // Get configuration from environment or use defaults
+      _backendBaseUrl = dotenv.env['BACKEND_API_URL'] ?? 'http://192.168.1.10:5000';
+      _cameraVideoFeedUrl = dotenv.env['CAMERA_VIDEO_FEED_URL'] ?? 'http://192.168.1.169';
+      _requestTimeout = Duration(
+        seconds: int.parse(dotenv.env['REQUEST_TIMEOUT'] ?? '30'),
+      );
+
+      print('ApiService initialized');
+      print('Backend API URL: $_backendBaseUrl');
+      print('Camera Video Feed URL: $_cameraVideoFeedUrl');
     } catch (e) {
-      print('MQTT connect error $e');
-      _mqttClient.disconnect();
+      print('Error initializing ApiService: $e');
+      // Use default values if environment loading fails
+      _backendBaseUrl = 'http://192.168.1.10:5000';
+      _cameraVideoFeedUrl = 'http://192.168.1.169';
+      _requestTimeout = const Duration(seconds: 30);
+    }
+  }
+
+  /// Get Backend API Base URL
+  String get backendBaseUrl => _backendBaseUrl;
+
+  /// Get Camera Video Feed URL
+  String get cameraVideoFeedUrl => _cameraVideoFeedUrl;
+
+  /// Get Request Timeout
+  Duration get requestTimeout => _requestTimeout;
+
+  // ============= BACKEND API METHODS =============
+
+  /// GET request to backend API
+  /// [endpoint] - API endpoint (e.g., '/users', '/devices')
+  /// [headers] - Optional custom headers
+  Future<http.Response> get(
+    String endpoint, {
+    Map<String, String>? headers,
+  }) async {
+    try {
+      final url = Uri.parse('$_backendBaseUrl$endpoint');
+      final response = await _httpClient
+          .get(
+            url,
+            headers: _getDefaultHeaders(headers),
+          )
+          .timeout(_requestTimeout);
+
+      _handleResponse(response);
+      return response;
+    } catch (e) {
+      print('GET Error: $e');
       rethrow;
     }
   }
 
-  void disconnectMqtt() {
-    _mqttClient.disconnect();
-  }
-
-  // Generic HTTP GET request with retry logic
-  Future<Map<String, dynamic>> _get(Uri uri) async {
-    int tries = 0;
-    int maxTries = 3;
-    int delayMs = 500;
-    while (tries < maxTries) {
-      try {
-        final res = await http.get(uri).timeout(const Duration(seconds: 5));
-        if (res.statusCode == 200) {
-          final jsonRes = jsonDecode(res.body);
-          // Removed special gallery logic to ensure consistent response handling
-          if (jsonRes['status'] == 'success' || jsonRes['status'] == 'empty') {
-            return jsonRes;
-          }
-          // The gallery endpoint might just return data without a 'success' status
-          if (uri.path.contains('/api/gallery')) {
-             return jsonRes;
-          }
-          throw Exception(jsonRes['message'] ?? 'Unknown server error');
-        } else if (res.statusCode >= 500) {
-          tries++;
-          await Future.delayed(Duration(milliseconds: delayMs));
-          delayMs *= 3;
-          continue;
-        } else {
-          throw Exception('HTTP ${res.statusCode}: ${res.body}');
-        }
-      } catch (e) {
-        tries++;
-        if (tries >= maxTries) rethrow;
-        await Future.delayed(Duration(milliseconds: delayMs));
-        delayMs *= 2;
-      }
-    }
-    throw Exception('Retries exhausted for GET ${uri.path}');
-  }
-
-  // Generic HTTP POST request with retry logic
-  Future<Map<String, dynamic>> _post(Uri uri, Map<String, dynamic> body) async {
-    final headers = {'Content-Type': 'application/json'};
-    int tries = 0;
-    int maxTries = 3;
-    int delayMs = 500;
-    while (tries < maxTries) {
-      try {
-        final res = await http.post(uri, headers: headers, body: jsonEncode(body)).timeout(const Duration(seconds: 5));
-        if (res.statusCode == 200) {
-          final jsonRes = jsonDecode(res.body);
-          if (jsonRes['status'] == 'success') return jsonRes;
-          throw Exception(jsonRes['message'] ?? 'Unknown server error');
-        } else if (res.statusCode >= 500) {
-          tries++;
-          await Future.delayed(Duration(milliseconds: delayMs));
-          delayMs *= 3;
-          continue;
-        } else {
-          throw Exception('HTTP ${res.statusCode}: ${res.body}');
-        }
-      } catch (e) {
-        tries++;
-        if (tries >= maxTries) rethrow;
-        await Future.delayed(Duration(milliseconds: delayMs));
-        delayMs *= 2;
-      }
-    }
-    throw Exception('Retries exhausted for POST ${uri.path}');
-  }
-
-  // MQTT Client instance getter
-  MqttServerClient get mqttClient => _mqttClient;
-
-  // 1. Kamera Hareket Ettirme
-  Future<void> moveCamera(String direction) async {
+  /// POST request to backend API
+  /// [endpoint] - API endpoint
+  /// [body] - Request body (will be JSON encoded)
+  /// [headers] - Optional custom headers
+  Future<http.Response> post(
+    String endpoint, {
+    dynamic body,
+    Map<String, String>? headers,
+  }) async {
     try {
-      final url = Uri.parse('$baseUrl/api/move/$direction');
-      await _get(url);
+      final url = Uri.parse('$_backendBaseUrl$endpoint');
+      final response = await _httpClient
+          .post(
+            url,
+            headers: _getDefaultHeaders(headers),
+            body: body != null ? jsonEncode(body) : null,
+          )
+          .timeout(_requestTimeout);
+
+      _handleResponse(response);
+      return response;
     } catch (e) {
-      print("Kamera hatası: $e");
+      print('POST Error: $e');
       rethrow;
     }
   }
 
-  // 2. Analiz Başlat (Foto Çek & Konseyi Tetikle)
-  Future<Map<String, dynamic>> analyzePlant() async {
+  /// PUT request to backend API
+  /// [endpoint] - API endpoint
+  /// [body] - Request body (will be JSON encoded)
+  /// [headers] - Optional custom headers
+  Future<http.Response> put(
+    String endpoint, {
+    dynamic body,
+    Map<String, String>? headers,
+  }) async {
     try {
-      final url = Uri.parse('$baseUrl/api/capture');
-      return await _get(url);
+      final url = Uri.parse('$_backendBaseUrl$endpoint');
+      final response = await _httpClient
+          .put(
+            url,
+            headers: _getDefaultHeaders(headers),
+            body: body != null ? jsonEncode(body) : null,
+          )
+          .timeout(_requestTimeout);
+
+      _handleResponse(response);
+      return response;
     } catch (e) {
-      print("Analiz başlatma hatası: $e");
+      print('PUT Error: $e');
       rethrow;
     }
   }
 
-  // 3. Konsey Geçmişini Çek (Sohbeti Gör)
-  Future<Map<String, dynamic>> getCouncilLog() async {
+  /// PATCH request to backend API
+  /// [endpoint] - API endpoint
+  /// [body] - Request body (will be JSON encoded)
+  /// [headers] - Optional custom headers
+  Future<http.Response> patch(
+    String endpoint, {
+    dynamic body,
+    Map<String, String>? headers,
+  }) async {
     try {
-      final url = Uri.parse('$baseUrl/api/council_log');
-      return await _get(url);
+      final url = Uri.parse('$_backendBaseUrl$endpoint');
+      final response = await _httpClient
+          .patch(
+            url,
+            headers: _getDefaultHeaders(headers),
+            body: body != null ? jsonEncode(body) : null,
+          )
+          .timeout(_requestTimeout);
+
+      _handleResponse(response);
+      return response;
     } catch (e) {
-      print("Konsey geçmişi hatası: $e");
+      print('PATCH Error: $e');
       rethrow;
     }
   }
 
-  // 4. CEO Mesajı Gönder (Senin Konuşman) - Now uses MQTT
-  Future<bool> sendCeoMessage(String message) async {
+  /// DELETE request to backend API
+  /// [endpoint] - API endpoint
+  /// [headers] - Optional custom headers
+  Future<http.Response> delete(
+    String endpoint, {
+    Map<String, String>? headers,
+  }) async {
     try {
-      final payload = jsonEncode({'message': message});
-      final builder = MqttClientPayloadBuilder();
-      builder.addUTF8String(payload);
-      _mqttClient.publishMessage('agrimind/mobile/ceo', MqttQos.atLeastOnce, builder.payload!);
-      return true;
-    } catch (e) {
-      print("Mesaj hatası (MQTT): $e");
-      return false;
-    }
-  }
+      final url = Uri.parse('$_backendBaseUrl$endpoint');
+      final response = await _httpClient
+          .delete(
+            url,
+            headers: _getDefaultHeaders(headers),
+          )
+          .timeout(_requestTimeout);
 
-  // 5. Canlı Yayın Linki
-  String get videoStreamUrl => "$baseUrl/video_feed";
-
-  // 6. Galeri Fotoğraflarını Çek (Önceki archived_photos)
-  Future<List<String>> fetchGallery() async {
-    try {
-      final uri = Uri.parse('$baseUrl/api/gallery');
-      final response = await _get(uri);
-      if (response['status'] == 'success' && response['data'] is List) {
-        // CORRECTED: Map the relative paths from the server to full URLs.
-        return List<String>.from(response['data'].map((path) => '$baseUrl$path'));
-      }
-      return [];
+      _handleResponse(response);
+      return response;
     } catch (e) {
-      print("Galeri fotoğrafları bağlantı hatası: $e");
+      print('DELETE Error: $e');
       rethrow;
     }
   }
 
-  // 7. Saatlik Raporu Çek
-  Future<Map<String, dynamic>> getHourlyReport() async {
+  // ============= CAMERA VIDEO FEED METHODS =============
+
+  /// Get camera video feed stream URL
+  /// [streamPath] - Path to the video stream (e.g., '/stream', '/mjpeg')
+  String getCameraStreamUrl({String streamPath = '/video_feed'}) {
+    return '$_cameraVideoFeedUrl$streamPath';
+  }
+
+  /// Get camera snapshot URL
+  /// [snapshotPath] - Path to the snapshot endpoint (e.g., '/snapshot')
+  String getCameraSnapshotUrl({String snapshotPath = '/snapshot'}) {
+    return '$_cameraVideoFeedUrl$snapshotPath';
+  }
+
+  /// Stream camera video feed
+  /// [streamPath] - Path to the video stream
+  /// [headers] - Optional custom headers
+  Future<http.StreamedResponse> streamCameraFeed({
+    String streamPath = '/video_feed',
+    Map<String, String>? headers,
+  }) async {
     try {
-      final url = Uri.parse('$baseUrl/api/reports/hourly');
-      return await _get(url);
+      final url = Uri.parse('$_cameraVideoFeedUrl$streamPath');
+      final request = http.Request('GET', url)
+        ..headers.addAll(_getDefaultHeaders(headers));
+
+      final response = await _httpClient.send(request).timeout(_requestTimeout);
+      return response;
     } catch (e) {
-      print("Saatlik rapor bağlantı hatası: $e");
+      print('Camera Stream Error: $e');
       rethrow;
     }
   }
 
-  // 8. Günlük Raporu Çek
-  Future<Map<String, dynamic>> getDailyReport() async {
+  /// Get camera snapshot
+  /// [snapshotPath] - Path to the snapshot endpoint
+  /// [headers] - Optional custom headers
+  Future<http.Response> getCameraSnapshot({
+    String snapshotPath = '/snapshot',
+    Map<String, String>? headers,
+  }) async {
     try {
-      final url = Uri.parse('$baseUrl/api/reports/daily');
-      return await _get(url);
+      final url = Uri.parse('$_cameraVideoFeedUrl$snapshotPath');
+      final response = await _httpClient
+          .get(
+            url,
+            headers: _getDefaultHeaders(headers),
+          )
+          .timeout(_requestTimeout);
+
+      return response;
     } catch (e) {
-      print("Günlük rapor bağlantı hatası: $e");
+      print('Camera Snapshot Error: $e');
       rethrow;
     }
   }
 
-  // 9. Haftalık Raporu Çek
-  Future<Map<String, dynamic>> getWeeklyReport() async {
+  // ============= HELPER METHODS =============
+
+  /// Get default headers with content-type
+  Map<String, String> _getDefaultHeaders(Map<String, String>? customHeaders) {
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'Flutter-App/1.0',
+    };
+
+    if (customHeaders != null) {
+      headers.addAll(customHeaders);
+    }
+
+    return headers;
+  }
+
+  /// Handle HTTP response status codes
+  void _handleResponse(http.Response response) {
+    switch (response.statusCode) {
+      case 200:
+      case 201:
+      case 204:
+        // Success responses
+        break;
+      case 400:
+        throw ApiException('Bad Request: ${response.body}', response.statusCode);
+      case 401:
+        throw ApiException('Unauthorized', response.statusCode);
+      case 403:
+        throw ApiException('Forbidden', response.statusCode);
+      case 404:
+        throw ApiException('Not Found', response.statusCode);
+      case 500:
+        throw ApiException('Internal Server Error', response.statusCode);
+      case 503:
+        throw ApiException('Service Unavailable', response.statusCode);
+      default:
+        throw ApiException(
+          'Unexpected Error: ${response.statusCode}',
+          response.statusCode,
+        );
+    }
+  }
+
+  /// Parse JSON response
+  static Map<String, dynamic> parseJson(String responseBody) {
     try {
-      final url = Uri.parse('$baseUrl/api/reports/weekly');
-      return await _get(url);
+      return jsonDecode(responseBody) as Map<String, dynamic>;
     } catch (e) {
-      print("Haftalık rapor bağlantı hatası: $e");
+      print('JSON Parse Error: $e');
       rethrow;
     }
   }
 
-  // 10. Aylık Raporu Çek
-  Future<Map<String, dynamic>> getMonthlyReport() async {
-    try {
-      final url = Uri.parse('$baseUrl/api/reports/monthly');
-      return await _get(url);
-    } catch (e) {
-      print("Aylık rapor bağlantı hatası: $e");
-      rethrow;
-    }
+  /// Dispose resources
+  void dispose() {
+    _httpClient.close();
   }
+}
 
-  // 11. Ayarları Çek
-  Future<Map<String, dynamic>> getSettings() async {
-    try {
-      final url = Uri.parse('$baseUrl/api/settings');
-      return await _get(url);
-    } catch (e) {
-      print("Ayarlar bağlantı hatası: $e");
-      rethrow;
-    }
-  }
+/// Custom API Exception
+class ApiException implements Exception {
+  final String message;
+  final int? statusCode;
 
-  // 12. Ayarları Güncelle
-  Future<bool> updateSettings(Map<String, dynamic> settings) async {
-    try {
-      final url = Uri.parse('$baseUrl/api/settings');
-      final response = await _post(url, settings);
-      return response['status'] == 'success';
-    } catch (e) {
-      print("Ayarlar güncellenemedi: $e");
-      rethrow;
-    }
-  }
+  ApiException(this.message, [this.statusCode]);
 
-  // 13. Manuel Dozlama
-  Future<bool> manualDose(String type, double amount) async {
-    try {
-      final url = Uri.parse('$baseUrl/api/manual_dose');
-      final response = await _post(url, {"type": type, "amount": amount});
-      return response['status'] == 'success';
-    } catch (e) {
-      print("Manuel dozlama hatası: $e");
-      rethrow;
-    }
-  }
-
-  // 14. İklim Kontrolü
-  Future<bool> controlClimate(String device, bool isOn) async {
-    try {
-      final url = Uri.parse('$baseUrl/api/control_climate');
-      final response = await _post(url, {"device": device, "is_on": isOn});
-      return response['status'] == 'success';
-    } catch (e) {
-      print("İklim kontrol hatası: $e");
-      rethrow;
-    }
-  }
+  @override
+  String toString() => 'ApiException: $message (Status: $statusCode)';
 }
