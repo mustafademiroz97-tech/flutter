@@ -3,18 +3,19 @@ import 'package:http/http.dart' as http;
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'dart:io';
+import '../config/environment.dart';
 
 class AgriApiService {
-  static const String baseUrl = "http://192.168.1.10:5000"; // Pi IP adresi
-  static const String mqttBrokerHost = "192.168.1.10"; // MQTT broker IP adresi
+  static String get baseUrl => Environment.baseUrl;
+  static String get mqttBrokerHost => Environment.mqttBrokerHost;
 
   late MqttServerClient _mqttClient;
 
   AgriApiService() {
     _mqttClient = MqttServerClient(mqttBrokerHost, 'flutter-client-${DateTime.now().millisecondsSinceEpoch}');
-    _mqttClient.port = 1883; // MQTT portu
-    _mqttClient.logging(on: false);
-    _mqttClient.keepAlivePeriod = 20;
+    _mqttClient.port = Environment.mqttBrokerPort;
+    _mqttClient.logging(on: Environment.enableMqttLogging);
+    _mqttClient.keepAlivePeriod = Environment.mqttKeepAlive.inSeconds;
     _mqttClient.onDisconnected = () => print('MQTT disconnected');
     _mqttClient.onConnected = () => print('MQTT Connected');
     _mqttClient.onSubscribed = (topic) => print('Subscribed to $topic');
@@ -38,11 +39,11 @@ class AgriApiService {
   // Generic HTTP GET request with retry logic
   Future<Map<String, dynamic>> _get(Uri uri) async {
     int tries = 0;
-    int maxTries = 3;
-    int delayMs = 500;
+    int maxTries = Environment.maxRetries;
+    int delayMs = Environment.initialRetryDelayMs;
     while (tries < maxTries) {
       try {
-        final res = await http.get(uri).timeout(const Duration(seconds: 5));
+        final res = await http.get(uri).timeout(Environment.apiTimeout);
         if (res.statusCode == 200) {
           final jsonRes = jsonDecode(res.body);
           // Removed special gallery logic to ensure consistent response handling
@@ -76,11 +77,11 @@ class AgriApiService {
   Future<Map<String, dynamic>> _post(Uri uri, Map<String, dynamic> body) async {
     final headers = {'Content-Type': 'application/json'};
     int tries = 0;
-    int maxTries = 3;
-    int delayMs = 500;
+    int maxTries = Environment.maxRetries;
+    int delayMs = Environment.initialRetryDelayMs;
     while (tries < maxTries) {
       try {
-        final res = await http.post(uri, headers: headers, body: jsonEncode(body)).timeout(const Duration(seconds: 5));
+        final res = await http.post(uri, headers: headers, body: jsonEncode(body)).timeout(Environment.apiTimeout);
         if (res.statusCode == 200) {
           final jsonRes = jsonDecode(res.body);
           if (jsonRes['status'] == 'success') return jsonRes;
@@ -117,11 +118,11 @@ class AgriApiService {
     }
   }
 
-  // 2. Analiz Başlat (Foto Çek & Konseyi Tetikle)
+  // 2. Analiz Başlat (Foto Çek & Konseyi Tetikle) - POST endpoint
   Future<Map<String, dynamic>> analyzePlant() async {
     try {
       final url = Uri.parse('$baseUrl/api/capture');
-      return await _get(url);
+      return await _post(url, {});
     } catch (e) {
       print("Analiz başlatma hatası: $e");
       rethrow;
@@ -139,16 +140,26 @@ class AgriApiService {
     }
   }
 
-  // 4. CEO Mesajı Gönder (Senin Konuşman) - Now uses MQTT
+  // 4. CEO Mesajı Gönder (Senin Konuşman) - Uses both MQTT and HTTP POST
   Future<bool> sendCeoMessage(String message) async {
     try {
+      // Send via MQTT for real-time
       final payload = jsonEncode({'message': message});
       final builder = MqttClientPayloadBuilder();
       builder.addUTF8String(payload);
       _mqttClient.publishMessage('agrimind/mobile/ceo', MqttQos.atLeastOnce, builder.payload!);
+      
+      // Also send via HTTP POST to /api/ceo_chat for logging/persistence
+      try {
+        final url = Uri.parse('$baseUrl/api/ceo_chat');
+        await _post(url, {'message': message});
+      } catch (e) {
+        print("HTTP CEO mesaj hatası: $e (MQTT başarılı)");
+      }
+      
       return true;
     } catch (e) {
-      print("Mesaj hatası (MQTT): $e");
+      print("Mesaj hatası: $e");
       return false;
     }
   }
@@ -259,6 +270,17 @@ class AgriApiService {
       return response['status'] == 'success';
     } catch (e) {
       print("İklim kontrol hatası: $e");
+      rethrow;
+    }
+  }
+
+  // 15. Sistem Sağlık Kontrolü
+  Future<Map<String, dynamic>> getHealth() async {
+    try {
+      final url = Uri.parse('$baseUrl/api/health');
+      return await _get(url);
+    } catch (e) {
+      print("Sağlık kontrolü hatası: $e");
       rethrow;
     }
   }
