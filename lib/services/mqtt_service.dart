@@ -4,7 +4,8 @@ import 'dart:io';
 import 'dart:math';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
-import '../models/mqtt_payload.dart'; // Model dosyasının yerinde olduğundan emin ol
+import '../models/mqtt_payload.dart';
+import '../config/environment.dart';
 
 class MqttManager {
   // Singleton Yapısı
@@ -27,9 +28,9 @@ class MqttManager {
     String clientId = 'flutter_admin_${Random().nextInt(9999)}';
 
     client = MqttServerClient(host, clientId);
-    client!.port = 1883;
-    client!.logging(on: true); // HATA AYIKLAMA İÇİN LOGLARI AÇTIM (Terminali izle)
-    client!.keepAlivePeriod = 60;
+    client!.port = Environment.mqttBrokerPort;
+    client!.logging(on: Environment.enableMqttLogging);
+    client!.keepAlivePeriod = Environment.mqttKeepAlive.inSeconds;
     client!.onDisconnected = _onDisconnected;
     client!.onConnected = _onConnected;
 
